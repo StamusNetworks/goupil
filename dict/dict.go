@@ -51,6 +51,24 @@ func (d Entry) Get(key ...string) (any, bool) {
 			return entry.Get(key[1:]...)
 		case Entry:
 			return res.Get(key[1:]...)
+		case []any:
+			collected := make([]any, 0, len(res))
+			for _, elem := range res {
+				switch m := elem.(type) {
+				case map[string]any:
+					if v, ok := Entry(m).Get(key[1:]...); ok {
+						collected = append(collected, v)
+					}
+				case Entry:
+					if v, ok := m.Get(key[1:]...); ok {
+						collected = append(collected, v)
+					}
+				}
+			}
+			if len(collected) == 0 {
+				return nil, false
+			}
+			return collected, true
 		default:
 			return val, ok
 		}
