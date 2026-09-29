@@ -27,17 +27,17 @@ func sockPath(t *testing.T) string {
 	return filepath.Join(dir, "s.sock")
 }
 
-func startListener(t *testing.T, cfg Config) (path string, stop func()) {
+func startListener(t *testing.T, cfg Config) (ln *Listener, stop func()) {
 	t.Helper()
 	cfg.Path = sockPath(t)
 	cfg.AcceptTimeout = 50 * time.Millisecond
 
-	l, err := NewListener(cfg)
+	ln, err := NewListener(cfg)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- l.Consume(ctx) }()
+	go func() { done <- ln.Consume(ctx) }()
 
 	var once sync.Once
 	stop = func() {
@@ -52,7 +52,7 @@ func startListener(t *testing.T, cfg Config) (path string, stop func()) {
 		})
 	}
 	t.Cleanup(stop)
-	return cfg.Path, stop
+	return ln, stop
 }
 
 func dial(t *testing.T, path string) net.Conn {
@@ -84,9 +84,9 @@ func TestConsumeLines(t *testing.T) {
 		`{"event_type":"dns","dns":{"rrname":"example.com"}}`,
 	}
 	ch := make(chan []byte, len(lines))
-	path, _ := startListener(t, Config{Handler: Copy(func(b []byte) { ch <- b })})
+	ln, _ := startListener(t, Config{Handler: Copy(func(b []byte) { ch <- b })})
 
-	c := dial(t, path)
+	c := dial(t, ln.Path)
 	for _, l := range lines {
 		_, err := c.Write([]byte(l + "\n"))
 		require.NoError(t, err)
@@ -102,9 +102,9 @@ func TestConsumeCopiesLines(t *testing.T) {
 		want[i] = fmt.Sprintf(`{"seq":%d,"pad":%q}`, i, strings.Repeat("x", 64+i%97))
 	}
 	ch := make(chan []byte, n)
-	path, _ := startListener(t, Config{Handler: Copy(func(b []byte) { ch <- b })})
+	ln, _ := startListener(t, Config{Handler: Copy(func(b []byte) { ch <- b })})
 
-	c := dial(t, path)
+	c := dial(t, ln.Path)
 	_, err := c.Write([]byte(strings.Join(want, "\n") + "\n"))
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { return len(ch) == n }, 3*time.Second, 10*time.Millisecond)
@@ -114,9 +114,9 @@ func TestConsumeCopiesLines(t *testing.T) {
 // An open but silent producer must not block shutdown.
 func TestConsumeStopsWithIdleConn(t *testing.T) {
 	got := make(chan []byte, 1)
-	path, stop := startListener(t, Config{Handler: Copy(func(b []byte) { got <- b })})
+	ln, stop := startListener(t, Config{Handler: Copy(func(b []byte) { got <- b })})
 
-	c := dial(t, path)
+	c := dial(t, ln.Path)
 	_, err := c.Write([]byte("{}\n"))
 	require.NoError(t, err)
 	recv(t, got, 1)
@@ -127,9 +127,9 @@ func TestConsumeStopsWithIdleConn(t *testing.T) {
 func TestConsumeJoinsFragments(t *testing.T) {
 	line := `{"event_type":"alert","payload_printable":"GET / HTTP/1.1"}`
 	got := make(chan []byte, 1)
-	path, _ := startListener(t, Config{Handler: Copy(func(b []byte) { got <- b })})
+	ln, _ := startListener(t, Config{Handler: Copy(func(b []byte) { got <- b })})
 
-	c := dial(t, path)
+	c := dial(t, ln.Path)
 	for i := 0; i < len(line); i += 7 {
 		_, err := c.Write([]byte(line[i:min(i+7, len(line))]))
 		require.NoError(t, err)
@@ -161,13 +161,13 @@ func TestConsumeReturnsWhenListenerClosed(t *testing.T) {
 func TestConsumeReportsTooLong(t *testing.T) {
 	got := make(chan []byte, 1)
 	errs := make(chan error, 1)
-	path, _ := startListener(t, Config{
+	ln, _ := startListener(t, Config{
 		MaxLineSize: 1024,
 		Handler:     Copy(func(b []byte) { got <- b }),
 		OnError:     func(err error) { errs <- err },
 	})
 
-	c := dial(t, path)
+	c := dial(t, ln.Path)
 	_, err := c.Write([]byte(strings.Repeat("x", 2048) + "\n"))
 	require.NoError(t, err)
 	select {
@@ -177,7 +177,7 @@ func TestConsumeReportsTooLong(t *testing.T) {
 		t.Fatal("oversized line not reported")
 	}
 
-	c = dial(t, path)
+	c = dial(t, ln.Path)
 	_, err = c.Write([]byte("{}\n"))
 	require.NoError(t, err)
 	require.Equal(t, []string{"{}"}, recv(t, got, 1))
@@ -210,9 +210,9 @@ func TestForceReplacesStaleSocket(t *testing.T) {
 
 // Persistent accept errors (EMFILE) must not spin, and serving resumes once they clear.
 func TestConsumeBacksOffOnAcceptError(t *testing.T) {
-	var errCount atomic.Int64
+	var errCount atomic.Uint64
 	got := make(chan []byte, 1)
-	path, _ := startListener(t, Config{
+	ln, _ := startListener(t, Config{
 		Handler: Copy(func(b []byte) { got <- b }),
 		OnError: func(error) { errCount.Add(1) },
 	})
@@ -234,7 +234,7 @@ func TestConsumeBacksOffOnAcceptError(t *testing.T) {
 		}
 		fill = append(fill, f)
 	}
-	require.NoError(t, syscall.Connect(fd, &syscall.SockaddrUnix{Name: path}))
+	require.NoError(t, syscall.Connect(fd, &syscall.SockaddrUnix{Name: ln.Path}))
 	time.Sleep(250 * time.Millisecond)
 	for _, f := range fill {
 		f.Close()
@@ -242,10 +242,11 @@ func TestConsumeBacksOffOnAcceptError(t *testing.T) {
 	require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_NOFILE, &orig))
 
 	require.Positive(t, errCount.Load())
-	require.Less(t, errCount.Load(), int64(20))
+	require.Less(t, errCount.Load(), uint64(20))
 	_, err = syscall.Write(fd, []byte("{}\n"))
 	require.NoError(t, err)
 	require.Equal(t, []string{"{}"}, recv(t, got, 1))
+	require.Equal(t, errCount.Load(), ln.Stats().AcceptErrors)
 }
 
 // Copy must detach the kept line from the buffer the caller reuses.
@@ -267,13 +268,13 @@ func TestRawHandlerLinesAreOverwritten(t *testing.T) {
 	}
 	var kept [][]byte
 	all := make(chan struct{})
-	path, stop := startListener(t, Config{Handler: func(b []byte) {
+	ln, stop := startListener(t, Config{Handler: func(b []byte) {
 		if kept = append(kept, b); len(kept) == n {
 			close(all)
 		}
 	}})
 
-	c := dial(t, path)
+	c := dial(t, ln.Path)
 	_, err := c.Write([]byte(strings.Join(want, "\n") + "\n"))
 	require.NoError(t, err)
 	select {
@@ -304,9 +305,9 @@ func TestConsumeLargeAlert(t *testing.T) {
 
 	lines := []string{`{"event_type":"flow"}`, string(alert), `{"event_type":"dns"}`}
 	ch := make(chan []byte, len(lines))
-	path, _ := startListener(t, Config{Handler: Copy(func(b []byte) { ch <- b })})
+	ln, _ := startListener(t, Config{Handler: Copy(func(b []byte) { ch <- b })})
 
-	c := dial(t, path)
+	c := dial(t, ln.Path)
 	_, err = c.Write([]byte(strings.Join(lines, "\n") + "\n"))
 	require.NoError(t, err)
 	require.Equal(t, lines, recv(t, ch, len(lines)))
@@ -317,13 +318,13 @@ func TestMaxLineSizeIsInclusive(t *testing.T) {
 	const size = 1024
 	got := make(chan []byte, 1)
 	errs := make(chan error, 1)
-	path, _ := startListener(t, Config{
+	ln, _ := startListener(t, Config{
 		MaxLineSize: size,
 		Handler:     Copy(func(b []byte) { got <- b }),
 		OnError:     func(err error) { errs <- err },
 	})
 
-	c := dial(t, path)
+	c := dial(t, ln.Path)
 	_, err := c.Write([]byte(strings.Repeat("x", size) + "\n"))
 	require.NoError(t, err)
 	select {
@@ -334,4 +335,32 @@ func TestMaxLineSizeIsInclusive(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("line not received")
 	}
+}
+
+// Stats must account for every connection, line and read error the listener saw.
+func TestStatsCounts(t *testing.T) {
+	got := make(chan []byte, 2)
+	errs := make(chan error, 1)
+	ln, _ := startListener(t, Config{
+		MaxLineSize: 16,
+		Handler:     Copy(func(b []byte) { got <- b }),
+		OnError:     func(err error) { errs <- err },
+	})
+
+	c := dial(t, ln.Path)
+	_, err := c.Write([]byte("{}\n{\"a\":1}\n"))
+	require.NoError(t, err)
+	recv(t, got, 2)
+	require.NoError(t, c.Close())
+
+	c = dial(t, ln.Path)
+	_, err = c.Write([]byte(strings.Repeat("x", 32) + "\n"))
+	require.NoError(t, err)
+	select {
+	case <-errs:
+	case <-time.After(3 * time.Second):
+		t.Fatal("oversized line not reported")
+	}
+
+	require.Equal(t, Stats{Connections: 2, Lines: 2, Bytes: 9, ReadErrors: 1}, ln.Stats())
 }
