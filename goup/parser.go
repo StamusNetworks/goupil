@@ -48,7 +48,7 @@ func (p *Parser) Parse(str string) *HostnameInfo {
 			stats.HostMaxTokenLength = p.dot
 		}
 		p.offset = p.start + p.dot + 1
-		if p.Suffixes.Has(str[p.offset:]) {
+		if p.Suffixes.Has(str[p.offset:]) || (p.Windcards.Has(str[p.offset:]) && p.Negate.Has(str[p.start:])) {
 			stats.HostMaxTokenLength = max(stats.HostMaxTokenLength, len(str)-p.offset)
 			stats.HostTokenCount++
 			parts := p.fillMatch(str, p.offset, p.start)
@@ -57,7 +57,7 @@ func (p *Parser) Parse(str string) *HostnameInfo {
 			return finish(hni, stats, false)
 		}
 
-		if p.Windcards.Has(str[p.offset:]) && !p.Negate.Has(str[p.offset:]) {
+		if p.Windcards.Has(str[p.offset:]) {
 			stats.HostMaxTokenLength = max(stats.HostMaxTokenLength, len(str)-p.start)
 			stats.HostTokenCount++
 			parts := p.fillMatch(str, p.start, p.last)
