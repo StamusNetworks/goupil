@@ -1,6 +1,10 @@
 package goup
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 var fuzzSeeds = []string{
 	"www.example.com",
@@ -27,4 +31,31 @@ func FuzzParse(f *testing.F) {
 	f.Fuzz(func(t *testing.T, str string) {
 		filter.Parse(str)
 	})
+}
+
+func TestParseNegation(t *testing.T) {
+	p, err := NewParser([]string{"jp", "*.kawasaki.jp", "!city.kawasaki.jp", "*.ck", "!www.ck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		host, tld, domain, subdomain, domainWithoutTld string
+	}{
+		{host: "city.kawasaki.jp", tld: "kawasaki.jp", domain: "city.kawasaki.jp", domainWithoutTld: "city"},
+		{host: "www.city.kawasaki.jp", tld: "kawasaki.jp", domain: "city.kawasaki.jp", subdomain: "www", domainWithoutTld: "city"},
+		{host: "www.ck", tld: "ck", domain: "www.ck", domainWithoutTld: "www"},
+		{host: "a.www.ck", tld: "ck", domain: "www.ck", subdomain: "a", domainWithoutTld: "www"},
+		{host: "a.b.ck", tld: "b.ck", domain: "a.b.ck", domainWithoutTld: "a"},
+		{host: "www.foo.kawasaki.jp", tld: "foo.kawasaki.jp", domain: "www.foo.kawasaki.jp", domainWithoutTld: "www"},
+	}
+	for _, test := range tests {
+		t.Run(test.host, func(t *testing.T) {
+			hni := p.Parse(test.host)
+			assert.Equal(t, test.tld, hni.TLD)
+			assert.Equal(t, test.domain, hni.Domain)
+			assert.Equal(t, test.subdomain, hni.Subdomain)
+			assert.Equal(t, test.domainWithoutTld, hni.DomainWithoutTld)
+			assert.False(t, hni.Stats.Failed)
+		})
+	}
 }
