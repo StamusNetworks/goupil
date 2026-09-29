@@ -16,6 +16,8 @@ type Listener struct {
 	UnixListener *net.UnixListener
 
 	Config
+
+	stats counters
 }
 
 func (l *Listener) Consume(ctx context.Context) error {
@@ -25,11 +27,13 @@ func (l *Listener) Consume(ctx context.Context) error {
 		c, err := l.accept()
 		switch {
 		case err == nil:
+			l.stats.connections.Add(1)
 			l.serve(ctx, c)
 		case errors.Is(err, os.ErrDeadlineExceeded):
 		case errors.Is(err, net.ErrClosed):
 			return nil
 		default:
+			l.stats.acceptErrors.Add(1)
 			l.onError(err)
 			select {
 			case <-ctx.Done():
@@ -62,9 +66,12 @@ func (l *Listener) serve(ctx context.Context, c net.Conn) {
 	scanner.Buffer(make([]byte, 0, min(initialBufSize, maxToken)), maxToken)
 
 	for ctx.Err() == nil && scanner.Scan() {
+		l.stats.lines.Add(1)
+		l.stats.bytes.Add(uint64(len(scanner.Bytes())))
 		l.Handler(scanner.Bytes())
 	}
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		l.stats.readErrors.Add(1)
 		l.onError(err)
 	}
 }
