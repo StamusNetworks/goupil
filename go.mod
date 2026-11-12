@@ -3,6 +3,7 @@ module github.com/StamusNetworks/goupil
 go 1.26.0
 
 require (
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/stretchr/testify v1.10.0
 	golang.org/x/net v0.50.0
 )
